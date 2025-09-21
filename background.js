@@ -48,7 +48,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       step: index + 1,
       selector: node.selector,
       instruction: node.text ? `Focus on ${node.text}` : `Inspect ${node.selector}`,
-      hint: node.clickable ? 'Clickable element' : 'Reference element'
+      hint: node.clickable ? 'Clickable element' : 'Reference element',
+      autoClick: Boolean(node.clickable)
     }));
 
     sendResponse?.({

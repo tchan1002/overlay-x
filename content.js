@@ -11,12 +11,20 @@ let phantomFrame = null;
 let phantomClickListener = null;
 
 let snapshotModulePromise = null;
+let guideModulePromise = null;
 
 function loadSnapshotModule() {
   if (!snapshotModulePromise) {
     snapshotModulePromise = import(chrome.runtime.getURL('content/domSnapshot.js'));
   }
   return snapshotModulePromise;
+}
+
+function loadGuideModule() {
+  if (!guideModulePromise) {
+    guideModulePromise = import(chrome.runtime.getURL('content/guideController.js'));
+  }
+  return guideModulePromise;
 }
 
 function ensureStyleElement() {
@@ -100,6 +108,32 @@ function describeElement(el) {
   const descriptor = (tag + id + classPart).slice(0, 80);
   return descriptor || tag;
 }
+
+
+function buildSelectorForElement(el) {
+  if (!el || !el.tagName) {
+    return '';
+  }
+  const parts = [];
+  let node = el;
+  while (node && node.nodeType === Node.ELEMENT_NODE) {
+    let selector = node.tagName.toLowerCase();
+    if (node.id) {
+      selector += `#${CSS.escape(node.id)}`;
+      parts.unshift(selector);
+      break;
+    }
+    const siblings = Array.from(node.parentNode?.children || []);
+    const sameTagSiblings = siblings.filter((sib) => sib.tagName === node.tagName);
+    if (sameTagSiblings.length > 1) {
+      selector += `:nth-of-type(${sameTagSiblings.indexOf(node) + 1})`;
+    }
+    parts.unshift(selector);
+    node = node.parentElement;
+  }
+  return parts.join(' > ');
+}
+
 
 function buttonName(button) {
   switch (button) {
@@ -254,6 +288,88 @@ function collectFormControls() {
     }));
 }
 
+function resolveStartPoint(originEvent) {
+  if (originEvent && typeof originEvent.clientX === 'number') {
+    return { x: originEvent.clientX, y: originEvent.clientY };
+  }
+  if (lastPointerEvent) {
+    return { x: lastPointerEvent.clientX, y: lastPointerEvent.clientY };
+  }
+  return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+}
+
+function resolveReferenceTarget(originEvent, startPoint) {
+  let referenceTarget = originEvent?.target || lastPointerEvent?.target;
+  if (isExtensionNode(referenceTarget)) {
+    const probe = document.elementFromPoint(startPoint.x, startPoint.y);
+    referenceTarget = isExtensionNode(probe) ? document.body : probe;
+  }
+  if (!referenceTarget) {
+    referenceTarget = document.elementFromPoint(startPoint.x, startPoint.y) || document.body;
+  }
+  return referenceTarget;
+}
+
+function ensureGuideController(GuideController) {
+  if (!window.__ldGuideController) {
+    window.__ldGuideController = new GuideController({
+      resolve: (selector) => {
+        try {
+          return document.querySelector(selector);
+        } catch (error) {
+          return null;
+        }
+      },
+      onBeforeStep: () => {},
+      onAnimate: (target, step) => animateGuideStep(target, step),
+      onStepStart: (step, state) => {
+        sendLog({ t: Date.now(), kind: 'tour-step', step: state.index + 1, selector: step.selector });
+      },
+      onTourComplete: () => {
+        sendLog({ t: Date.now(), kind: 'tour-complete' });
+      }
+    });
+  }
+  return window.__ldGuideController;
+}
+
+function loadGuideSteps(steps) {
+  window.__ldGuideSteps = Array.isArray(steps) ? steps.slice() : [];
+}
+
+function runGuide() {
+  const steps = window.__ldGuideSteps || [];
+  if (!steps.length) {
+    return;
+  }
+  const controller = window.__ldGuideController;
+  if (!controller) {
+    return;
+  }
+  controller.loadSteps(steps);
+  controller.play();
+}
+
+function animateGuideStep(target, step) {
+  const rect = target.getBoundingClientRect();
+  const startPoint = resolveStartPoint();
+  const centerEvent = {
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+    target
+  };
+  currentAction = step.instruction || 'Guiding…';
+  updateTooltip(centerEvent, describeElement(target));
+  animatePhantom(
+    startPoint,
+    { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+    target
+  );
+  if (step.autoClick && typeof target.click === 'function') {
+    target.click();
+  }
+}
+
 function findNearestFormControl(startPoint) {
   const candidates = collectFormControls();
   if (!candidates.length) {
@@ -360,23 +476,12 @@ function animatePhantom(startPoint, destinationPoint, targetEl) {
   phantomFrame = requestAnimationFrame(step);
 }
 
-function guideToNearestForm(originEvent, trigger = 'popup') {
-  const hasOrigin = Boolean(originEvent && typeof originEvent.clientX === 'number');
-  const startPoint = hasOrigin
-    ? { x: originEvent.clientX, y: originEvent.clientY }
-    : lastPointerEvent
-      ? { x: lastPointerEvent.clientX, y: lastPointerEvent.clientY }
-      : { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+async function guideToNearestForm(originEvent, trigger = 'popup') {
+  const { GuideController } = await loadGuideModule();
+  ensureGuideController(GuideController);
 
-  let referenceTarget = hasOrigin ? originEvent.target : lastPointerEvent?.target;
-  if (isExtensionNode(referenceTarget)) {
-    const probe = document.elementFromPoint(startPoint.x, startPoint.y);
-    referenceTarget = isExtensionNode(probe) ? document.body : probe;
-  }
-  if (!referenceTarget) {
-    referenceTarget = document.elementFromPoint(startPoint.x, startPoint.y) || document.body;
-  }
-
+  const startPoint = resolveStartPoint(originEvent);
+  const referenceTarget = resolveReferenceTarget(originEvent, startPoint);
   const nearest = findNearestFormControl(startPoint);
 
   if (!nearest) {
@@ -392,12 +497,19 @@ function guideToNearestForm(originEvent, trigger = 'popup') {
   }
 
   currentAction = 'Guiding to form…';
-  const syntheticEvent = hasOrigin
-    ? originEvent
-    : { clientX: startPoint.x, clientY: startPoint.y, target: referenceTarget };
-  updateTooltip(syntheticEvent, describeElement(referenceTarget));
+  updateTooltip(
+    originEvent || { clientX: startPoint.x, clientY: startPoint.y, target: referenceTarget },
+    describeElement(referenceTarget)
+  );
 
-  animatePhantom(startPoint, { x: nearest.centerX, y: nearest.centerY }, nearest.el);
+  loadGuideSteps([
+    {
+      selector: buildSelectorForElement(nearest.el),
+      instruction: 'Nearest form control',
+      dwellMs: 800
+    }
+  ]);
+  runGuide();
 
   const targetLabel = describeElement(nearest.el);
   sendLog({
@@ -577,6 +689,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return;
   }
 
+  if (message?.type === 'RUN_TOUR_STEPS') {
+    (async () => {
+      try {
+        const { GuideController } = await loadGuideModule();
+        const controller = ensureGuideController(GuideController);
+        const steps = Array.isArray(message.steps) ? message.steps : [];
+        loadGuideSteps(steps);
+        controller.loadSteps(steps);
+        controller.play();
+        sendResponse?.({ ok: true, count: steps.length });
+      } catch (error) {
+        sendResponse?.({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Unable to run tour steps'
+        });
+      }
+    })();
+    return true;
+  }
+
   if (message?.type === 'CAPTURE_DOM_SNAPSHOT') {
     (async () => {
       try {
@@ -608,7 +740,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     const triggerLabel = message.trigger && typeof message.trigger === 'string' ? message.trigger : 'popup';
-    const result = guideToNearestForm(undefined, triggerLabel);
-    sendResponse?.(result);
+    guideToNearestForm(undefined, triggerLabel).then((result) => sendResponse?.(result));
+    return true;
   }
 });

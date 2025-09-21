@@ -111,6 +111,12 @@ requestTourBtn.addEventListener('click', async () => {
           .join(' -> ');
         prependLog(`Tour preview: ${preview}`);
       }
+      if (count) {
+        const runResponse = await chrome.tabs.sendMessage(tab.id, { type: 'RUN_TOUR_STEPS', steps });
+        if (!runResponse?.ok) {
+          setStatus(runResponse?.error || 'Unable to run tour steps.', true);
+        }
+      }
     } else if (response === null) {
       setStatus('Unable to request tour on this page.', true);
     } else {
