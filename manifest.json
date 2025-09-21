@@ -23,5 +23,11 @@
       "css": ["styles.css"],
       "run_at": "document_idle"
     }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/domSnapshot.js"],
+      "matches": ["<all_urls>"]
+    }
   ]
 }

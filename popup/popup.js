@@ -3,6 +3,8 @@ const statusEl = document.getElementById('status');
 const logEl = document.getElementById('log');
 const clearBtn = document.getElementById('clear');
 const guideBtn = document.getElementById('guide');
+const snapshotBtn = document.getElementById('snapshot');
+const requestTourBtn = document.getElementById('request-tour');
 
 const setStatus = (message, isError = false) => {
   statusEl.textContent = message || '';
@@ -41,6 +43,82 @@ guideBtn.addEventListener('click', async () => {
     }
   } finally {
     guideBtn.disabled = false;
+  }
+});
+
+snapshotBtn.addEventListener('click', async () => {
+  setStatus('Capturing DOM snapshot…');
+  snapshotBtn.disabled = true;
+  try {
+    const tab = await getActiveTab();
+    if (!tab?.id) {
+      setStatus('No active tab detected.', true);
+      return;
+    }
+    const response = await sendMessageToTab({ type: 'CAPTURE_DOM_SNAPSHOT' });
+    if (response && response.ok) {
+      const count = Array.isArray(response.nodes) ? response.nodes.length : 0;
+      setStatus(`Captured ${count} nodes.`);
+      prependLog(`Snapshot captured (${count} nodes).`);
+      if (count) {
+        const preview = response.nodes.slice(0, 3).map((n) => n.selector).join(', ');
+        if (preview) {
+          prependLog(`Snapshot preview: ${preview}`);
+        }
+      }
+      const storeResponse = await chrome.runtime.sendMessage({
+        type: 'STORE_SNAPSHOT',
+        tabId: tab.id,
+        url: tab.url,
+        nodes: response.nodes
+      });
+      if (!storeResponse?.ok) {
+        setStatus(storeResponse?.error || 'Snapshot stored locally only.', true);
+      }
+    } else if (response === null) {
+      setStatus('Unable to capture snapshot on this page.', true);
+    } else {
+      const message = response?.error || 'Snapshot capture failed.';
+      setStatus(message, true);
+    }
+  } finally {
+    snapshotBtn.disabled = false;
+  }
+});
+
+requestTourBtn.addEventListener('click', async () => {
+  setStatus('Requesting mock tour…');
+  requestTourBtn.disabled = true;
+  try {
+    const tab = await getActiveTab();
+    if (!tab?.id) {
+      setStatus('No active tab detected.', true);
+      return;
+    }
+    const response = await chrome.runtime.sendMessage({
+      type: 'REQUEST_TOUR',
+      tabId: tab.id,
+      url: tab.url
+    });
+    if (response && response.ok) {
+      const steps = Array.isArray(response.steps) ? response.steps : [];
+      const count = steps.length;
+      const plural = count === 1 ? '' : 's';
+      setStatus(`Mock tour ready with ${count} step${plural}.`);
+      if (count) {
+        const preview = steps.slice(0, 3)
+          .map((step, idx) => step.selector || step.instruction || `step-${idx + 1}`)
+          .join(' -> ');
+        prependLog(`Tour preview: ${preview}`);
+      }
+    } else if (response === null) {
+      setStatus('Unable to request tour on this page.', true);
+    } else {
+      const message = response?.error || 'No snapshot stored for mock tour.';
+      setStatus(message, true);
+    }
+  } finally {
+    requestTourBtn.disabled = false;
   }
 });
 

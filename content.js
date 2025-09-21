@@ -10,6 +10,15 @@ let pendingGuide = false;
 let phantomFrame = null;
 let phantomClickListener = null;
 
+let snapshotModulePromise = null;
+
+function loadSnapshotModule() {
+  if (!snapshotModulePromise) {
+    snapshotModulePromise = import(chrome.runtime.getURL('content/domSnapshot.js'));
+  }
+  return snapshotModulePromise;
+}
+
 function ensureStyleElement() {
   let styleEl = document.getElementById(STYLE_ID);
   if (!styleEl) {
@@ -566,6 +575,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'QUERY_BORDERS') {
     sendResponse?.({ enabled: bordersEnabled });
     return;
+  }
+
+  if (message?.type === 'CAPTURE_DOM_SNAPSHOT') {
+    (async () => {
+      try {
+        const { snapshotDomNodes } = await loadSnapshotModule();
+        const nodes = snapshotDomNodes({
+          overlayIds: [TOOLTIP_ID, PHANTOM_ID, STYLE_ID],
+          skipSelectors: [`#${TOOLTIP_ID}`, `#${PHANTOM_ID}`]
+        });
+        sendResponse?.({ ok: true, nodes });
+      } catch (error) {
+        sendResponse?.({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    })();
+    return true;
   }
 
   if (message?.type === 'GUIDE_TO_FORM') {
