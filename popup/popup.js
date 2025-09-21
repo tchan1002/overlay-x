@@ -2,6 +2,7 @@ const toggle = document.getElementById('toggle');
 const statusEl = document.getElementById('status');
 const logEl = document.getElementById('log');
 const clearBtn = document.getElementById('clear');
+const guideBtn = document.getElementById('guide');
 
 const setStatus = (message, isError = false) => {
   statusEl.textContent = message || '';
@@ -16,6 +17,31 @@ const prependLog = (text) => {
 clearBtn.addEventListener('click', () => {
   logEl.textContent = '';
   setStatus('Log cleared.');
+});
+
+guideBtn.addEventListener('click', async () => {
+  setStatus('Guiding to nearest form…');
+  guideBtn.disabled = true;
+  try {
+    const response = await sendMessageToTab({ type: 'GUIDE_TO_FORM', trigger: 'click' });
+    if (response && response.awaitingClick) {
+      setStatus('Click on the page to guide to the nearest form.');
+    } else if (response && response.ok) {
+      const label = response.label || 'form control';
+      const trigger = response.trigger && response.trigger !== 'popup'
+        ? ` via ${response.trigger.replace(/-/g, ' ')}`
+        : '';
+      setStatus(`Guided to ${label}${trigger}. Click phantom cursor to dismiss.`);
+    } else if (response === null) {
+      setStatus('Unable to guide on this page.', true);
+    } else if (response && response.reason === 'no-form') {
+      setStatus('No form controls found in view.', true);
+    } else {
+      setStatus('Guide command failed.', true);
+    }
+  } finally {
+    guideBtn.disabled = false;
+  }
 });
 
 const getActiveTab = async () => {
@@ -73,6 +99,12 @@ const describeLogEntry = (payload = {}) => {
       return `Wheel (dx:${payload.dx}, dy:${payload.dy}) → ${label}`;
     case 'toggle':
       return `Toggle borders ${payload.enabled ? 'ON' : 'OFF'}`;
+    case 'guide': {
+      const trigger = payload.trigger ? ` (${payload.trigger})` : '';
+      return payload.error
+        ? `Guide failed${trigger} (${payload.error || 'unknown'})`
+        : `Guide${trigger} → ${label}`;
+    }
     default:
       return JSON.stringify(payload);
   }
@@ -81,6 +113,17 @@ const describeLogEntry = (payload = {}) => {
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'DEBUG_LOG' && message.payload) {
     prependLog(describeLogEntry(message.payload));
+    if (message.payload.kind === 'guide') {
+      if (message.payload.error) {
+        setStatus('No form controls found in view.', true);
+      } else {
+        const label = message.payload.el || 'form control';
+        const trigger = message.payload.trigger && message.payload.trigger !== 'popup'
+          ? ` via ${message.payload.trigger.replace(/-/g, ' ')}`
+          : '';
+        setStatus(`Guided to ${label}${trigger}. Click phantom cursor to dismiss.`);
+      }
+    }
   }
 });
 
